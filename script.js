@@ -143,25 +143,35 @@ function renderProducts() {
     updatePageInfo();
 }
 
+// Multi-proxy image loading strategies
+function getImageWithStrategies(originalUrl) {
+    if (!originalUrl) return '';
+
+    // Use hash to consistently pick same strategy for same URL
+    const hash = originalUrl.split('').reduce((a, b) => ((a << 5) - a) + b.charCodeAt(0), 0);
+    const strategies = [
+        originalUrl, // Direct
+        `https://wsrv.nl/?url=${encodeURIComponent(originalUrl)}&default=1`,
+        `https://images.weserv.nl/?url=${encodeURIComponent(originalUrl)}&default=1`,
+    ];
+
+    return strategies[Math.abs(hash) % strategies.length];
+}
+
 // Create Product Row
 function createProductRow(product) {
     const images = product.images || [];
     const category = product.category || {};
 
-    // Filter out only truly invalid URLs (empty strings, null, undefined)
-    // Keep all URLs that look like they might be images
+    // Filter out only truly invalid URLs
     const validImages = images.filter(img => {
         if (!img || typeof img !== 'string') return false;
-
-        // Remove any array notation artifacts like ["url"] 
         const cleanImg = img.trim().replace(/^\["|"\]$/g, '');
 
         try {
-            // Try to parse as URL
             const url = new URL(cleanImg);
             return url.protocol === 'http:' || url.protocol === 'https:';
         } catch {
-            // If it starts with http/https but failed URL parsing, still try to use it
             if (cleanImg.startsWith('http://') || cleanImg.startsWith('https://')) {
                 return true;
             }
@@ -169,9 +179,9 @@ function createProductRow(product) {
         }
     });
 
-    // Debug: Log how many images we found
+    // Debug logging
     if (validImages.length !== images.length) {
-        console.log(`Product ${product.id}: ${images.length} total images, ${validImages.length} valid images`);
+        console.log(`Product ${product.id}: ${images.length} total, ${validImages.length} valid images`);
     }
 
     return `
@@ -188,22 +198,23 @@ function createProductRow(product) {
             </td>
             <td>
                 <div class="category-badge">
-                    ${category.image ? `<img src="${category.image}" alt="${escapeHtml(category.name)}" class="category-image" referrerpolicy="no-referrer" onerror="handleImageError(this)">` : ''}
+                    ${category.image ? `<img src="${getImageWithStrategies(category.image)}" alt="${escapeHtml(category.name)}" class="category-image" referrerpolicy="no-referrer" crossorigin="anonymous" onerror="handleImageError(this, '${category.image}')">` : ''}
                     <span>${escapeHtml(category.name || 'N/A')}</span>
                 </div>
             </td>
             <td>
                 <div class="product-images">
                     ${validImages.length > 0 ? validImages.map((img, index) => {
-        // Clean the image URL
         const cleanImg = img.trim().replace(/^\["|"\]$/g, '');
+        const proxiedUrl = getImageWithStrategies(cleanImg);
         return `
-                        <div class="product-image-wrapper" data-image-index="${index}" data-product-id="${product.id}">
-                            <img src="${cleanImg}" 
+                        <div class="product-image-wrapper" data-image-index="${index}" data-product-id="${product.id}" data-original-url="${escapeHtml(cleanImg)}" data-attempt="0">
+                            <img src="${proxiedUrl}" 
                                  alt="${escapeHtml(product.title)} - Ảnh ${index + 1}" 
                                  class="product-image" 
                                  referrerpolicy="no-referrer"
-                                 onerror="handleImageError(this)"
+                                 crossorigin="anonymous"
+                                 onerror="handleImageError(this, '${cleanImg}')"
                                  loading="lazy">
                             <div class="image-overlay">
                                 <i class="bi bi-zoom-in"></i>
@@ -370,34 +381,52 @@ function escapeHtml(text) {
     return text ? text.replace(/[&<>"']/g, m => map[m]) : '';
 }
 
-// Handle Image Error - Replace with placeholder
-function handleImageError(img) {
+// Handle Image Error with fallback strategies
+function handleImageError(img, originalUrl) {
     // Check if already replaced to avoid infinite loop
     if (img.classList.contains('image-error')) {
         return;
     }
 
-    img.classList.add('image-error');
-
-    // Log the error for debugging
-    console.log('Image failed to load:', img.src);
-
-    // For category images, just hide them
-    if (img.classList.contains('category-image')) {
-        img.style.display = 'none';
+    const wrapper = img.closest('.product-image-wrapper');
+    if (!wrapper) {
+        // Category image - just hide it
+        if (img.classList.contains('category-image')) {
+            img.style.display = 'none';
+        }
         return;
     }
 
-    // For product images, replace with a placeholder
-    const wrapper = img.closest('.product-image-wrapper');
-    if (wrapper) {
+    // Get current attempt number
+    let attempt = parseInt(wrapper.getAttribute('data-attempt') || '0');
+    attempt++;
+
+    console.log(`Image load failed (attempt ${attempt}):`, img.src);
+
+    // Try different proxy strategies
+    const strategies = [
+        originalUrl, // Direct
+        `https://wsrv.nl/?url=${encodeURIComponent(originalUrl)}&default=1`,
+        `https://images.weserv.nl/?url=${encodeURIComponent(originalUrl)}&default=1`,
+        `https://corsproxy.io/?${encodeURIComponent(originalUrl)}`,
+    ];
+
+    if (attempt < strategies.length) {
+        // Try next strategy
+        wrapper.setAttribute('data-attempt', attempt);
+        img.src = strategies[attempt];
+        console.log(`Trying strategy ${attempt + 1}:`, strategies[attempt]);
+    } else {
+        // All strategies failed - show placeholder
+        img.classList.add('image-error');
         const productId = wrapper.getAttribute('data-product-id');
         const imageIndex = wrapper.getAttribute('data-image-index');
-        console.log(`Replacing image ${imageIndex} for product ${productId} with placeholder`);
+        console.log(`All strategies failed for product ${productId}, image ${imageIndex}`);
 
         wrapper.innerHTML = `
             <div class="image-placeholder">
-                <i class="bi bi-image" style="font-size: 2rem; color: #cbd5e1;"></i>
+                <i class="bi bi-image-slash"></i>
+                <small>Ảnh không còn tồn tại</small>
             </div>
         `;
     }
@@ -405,4 +434,3 @@ function handleImageError(img) {
 
 // Make changePage available globally
 window.changePage = changePage;
-
